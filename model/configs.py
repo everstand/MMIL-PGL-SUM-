@@ -4,7 +4,7 @@ import torch
 from pathlib import Path
 import pprint
 
-save_dir = Path('../PGL-SUM/Summaries/PGL-SUM/exp1')
+default_save_dir = Path('../PGL-SUM/experiments/results/exp1')
 
 
 def str2bool(v):
@@ -29,6 +29,18 @@ class Config(object):
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+        self.protocol = self.protocol.lower()
+        if self.protocol not in ('paper', 'clean'):
+            raise ValueError("protocol must be either 'paper' or 'clean'.")
+        if self.selection_metric != 'val_fscore':
+            raise ValueError("selection_metric must be val_fscore.")
+        if self.protocol == 'clean' and not self.save_checkpoints:
+            raise ValueError("clean protocol requires --save_checkpoints true.")
+        if not 0.0 < self.val_ratio < 1.0:
+            raise ValueError("val_ratio must be in (0, 1).")
+        if self.early_stop_patience < 0:
+            raise ValueError("early_stop_patience must be >= 0.")
+
         self.set_dataset_dir(self.video_type)
 
     def set_dataset_dir(self, video_type='TVSum'):
@@ -36,9 +48,10 @@ class Config(object):
 
         :param str video_type: The Dataset being used, SumMe or TVSum.
         """
-        self.log_dir = save_dir.joinpath(video_type, 'logs/split' + str(self.split_index))
-        self.score_dir = save_dir.joinpath(video_type, 'results/split' + str(self.split_index))
-        self.save_dir = save_dir.joinpath(video_type, 'models/split' + str(self.split_index))
+        exp_root = Path(self.exp_root)
+        self.log_dir = exp_root.joinpath(video_type, 'logs/split' + str(self.split_index))
+        self.score_dir = exp_root.joinpath(video_type, 'results/split' + str(self.split_index))
+        self.save_dir = exp_root.joinpath(video_type, 'models/split' + str(self.split_index))
 
     def __repr__(self):
         """Pretty-print configurations in alphabetical order"""
@@ -56,9 +69,22 @@ def get_config(parse=True, **optional_kwargs):
     parser = argparse.ArgumentParser()
 
     # Mode
-    parser.add_argument('--mode', type=str, default='train', help='Mode for the configuration [train | test]')
+    parser.add_argument('--mode', type=str, default='train', help='Mode for the configuration [train | val | test]')
     parser.add_argument('--verbose', type=str2bool, default='false', help='Print or not training messages')
     parser.add_argument('--video_type', type=str, default='SumMe', help='Dataset to be used')
+    parser.add_argument('--protocol', type=str, default='paper', choices=['paper', 'clean'],
+                        help='paper evaluates test each epoch; clean uses inner validation for selection and tests once')
+    parser.add_argument('--exp_root', type=str, default=str(default_save_dir),
+                        help='Root directory where experiment logs, scores and checkpoints are stored')
+    parser.add_argument('--val_ratio', type=float, default=0.2,
+                        help='Validation ratio carved from outer-fold train_keys for clean protocol')
+    parser.add_argument('--val_seed', type=int, default=0,
+                        help='Seed for deterministic inner validation split')
+    parser.add_argument('--early_stop_patience', type=int, default=0,
+                        help='Stop after this many epochs without val F-score improvement; 0 disables early stopping')
+    parser.add_argument('--tvsum_anno_path', type=str,
+                        default='../PGL-SUM/data/datasets/TVSum/ydata-anno.tsv',
+                        help='Path to official TVSum ydata annotation TSV for rank metrics')
 
     # Model
     parser.add_argument('--input_size', type=int, default=1024, help='Feature size expected in the input')
@@ -77,6 +103,11 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--split_index', type=int, default=0, help='Data split to be used [0-4]')
     parser.add_argument('--init_type', type=str, default="xavier", help='Weight initialization method')
     parser.add_argument('--init_gain', type=float, default=None, help='Scaling factor for the initialization methods')
+    parser.add_argument('--save_checkpoints', type=str2bool, default='false',
+                        help='Save model parameters after each training epoch')
+    parser.add_argument('--selection_metric', type=str, default='val_fscore',
+                        choices=['val_fscore'],
+                        help='Checkpoint selection metric; clean protocol uses validation F-score')
 
     if parse:
         kwargs = parser.parse_args()

@@ -9,7 +9,7 @@ import sys
 exp_path = sys.argv[1]
 dataset = sys.argv[2]
 ''' without args
-exp_path = "../PGL-SUM/Summaries/PGL-SUM/exp1"
+exp_path = "../PGL-SUM/experiments/results/exp1"
 dataset = "SumMe"
 '''
 

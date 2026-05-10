@@ -7,20 +7,33 @@ import os
 import random
 import json
 import h5py
+import sys
+from pathlib import Path
 from tqdm import tqdm, trange
+
+EVAL_DIR = Path(__file__).resolve().parents[1].joinpath('evaluation')
+if str(EVAL_DIR) not in sys.path:
+    sys.path.append(str(EVAL_DIR))
+from evaluation_metrics import evaluate_summary
+from generate_summary import generate_summary
+from rank_metrics import compute_rank_metrics
+
 from layers.summarizer import PGL_SUM
 from utils import TensorboardWriter
 
 
 class Solver(object):
-    def __init__(self, config=None, train_loader=None, test_loader=None):
+    def __init__(self, config=None, train_loader=None, val_loader=None, test_loader=None):
         """Class that Builds, Trains and Evaluates PGL-SUM model"""
         # Initialize variables to None, to be safe
         self.model, self.optimizer, self.writer = None, None, None
 
         self.config = config
         self.train_loader = train_loader
+        self.val_loader = val_loader
         self.test_loader = test_loader
+        self.train_losses = []
+        self.val_metrics = []
 
         # Set the seed for generating reproducible random numbers
         if self.config.seed is not None:
@@ -77,7 +90,10 @@ class Solver(object):
             self.model.train()
 
             loss_history = []
-            num_batches = int(len(self.train_loader) / self.config.batch_size)  # full-batch or mini batch
+            if len(self.train_loader) == 0:
+                raise ValueError('The training set is empty.')
+            batch_size = min(self.config.batch_size, len(self.train_loader))
+            num_batches = int(len(self.train_loader) / batch_size)  # full-batch or mini batch
             iterator = iter(self.train_loader)
             for _ in trange(num_batches, desc='Batch', ncols=80, leave=False):
                 # ---- Training ... ----#
@@ -85,7 +101,7 @@ class Solver(object):
                     tqdm.write('Time to train the model...')
 
                 self.optimizer.zero_grad()
-                for _ in trange(self.config.batch_size, desc='Video', ncols=80, leave=False):
+                for _ in trange(batch_size, desc='Video', ncols=80, leave=False):
                     frame_features, target = next(iterator)
 
                     frame_features = frame_features.to(self.config.device)
@@ -98,7 +114,7 @@ class Solver(object):
                         tqdm.write(f'[{epoch_i}] loss: {loss.item()}')
 
                     loss.backward()
-                    loss_history.append(loss.data)
+                    loss_history.append(loss.detach())
                 # Update model parameters every 'batch_size' iterations
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip)
                 self.optimizer.step()
@@ -111,49 +127,176 @@ class Solver(object):
                 tqdm.write('Plotting...')
 
             self.writer.update_loss(loss, epoch_i, 'loss_epoch')
-            # Uncomment to save parameters at checkpoint
             if not os.path.exists(self.config.save_dir):
                 os.makedirs(self.config.save_dir)
-            # ckpt_path = str(self.config.save_dir) + f'/epoch-{epoch_i}.pkl'
-            # tqdm.write(f'Save parameters at {ckpt_path}')
-            # torch.save(self.model.state_dict(), ckpt_path)
+            self.train_losses.append(float(loss.detach().cpu().item()))
+            if self.config.save_checkpoints:
+                self.save_checkpoint(epoch_i)
 
-            self.evaluate(epoch_i)
+            if self.config.protocol == 'paper':
+                self.evaluate(epoch_i)
+            elif self.config.selection_metric == 'val_fscore':
+                metrics = self.evaluate_metrics(epoch_i, self.val_loader,
+                                                self.config.score_dir.joinpath('val'))
+                self.val_metrics.append(metrics)
+                self.writer.update_loss(metrics['fscore'], epoch_i, 'val_fscore')
+                patience = self.config.early_stop_patience
+                if patience > 0:
+                    best_epoch = int(np.argmax([m['fscore'] for m in self.val_metrics]))
+                    if epoch_i - best_epoch >= patience:
+                        break
 
-    def evaluate(self, epoch_i, save_weights=False):
-        """ Saves the frame's importance scores for the test videos in json format.
+        if self.writer is not None:
+            self.writer.close()
+        if self.config.protocol == 'paper':
+            return None
+        selected_epoch = self.select_epoch()
+        self.save_training_summary(selected_epoch)
+        return selected_epoch
 
-        :param int epoch_i: The current training epoch.
-        :param bool save_weights: Optionally, the user can choose to save the attention weights in a (large) h5 file.
-        """
+    def checkpoint_path(self, epoch_i):
+        """Return the checkpoint path for an epoch."""
+        return self.config.save_dir.joinpath(f'epoch-{epoch_i}.pt')
+
+    def save_checkpoint(self, epoch_i):
+        """Save model parameters for later clean-protocol model selection."""
+        ckpt_path = self.checkpoint_path(epoch_i)
+        torch.save(self.model.state_dict(), ckpt_path)
+        ckpt_path.chmod(0o777)
+
+    def load_checkpoint(self, epoch_i):
+        """Load model parameters from a saved checkpoint."""
+        ckpt_path = self.checkpoint_path(epoch_i)
+        if not ckpt_path.exists():
+            raise FileNotFoundError(f'Checkpoint not found: {ckpt_path}')
+        self.model.load_state_dict(torch.load(ckpt_path, map_location=self.config.device))
+
+    def select_epoch(self):
+        """Select the checkpoint epoch without looking at the test set."""
+        if not self.val_metrics:
+            raise ValueError('val_fscore selection requires validation metrics.')
+        return int(np.argmax(np.asarray([m['fscore'] for m in self.val_metrics])))
+
+    def save_training_summary(self, selected_epoch):
+        """Persist clean/paper selection metadata for reproducibility."""
+        summary = {
+            'protocol': self.config.protocol,
+            'selection_metric': self.config.selection_metric,
+            'selected_epoch': int(selected_epoch),
+            'selected_train_loss': self.train_losses[selected_epoch],
+            'train_losses': self.train_losses,
+            'val_metrics': self.val_metrics,
+            'requested_batch_size': self.config.batch_size,
+            'effective_batch_size': min(self.config.batch_size, len(self.train_loader)) if self.train_loader is not None else None,
+        }
+        if self.val_metrics:
+            summary['selected_val_metrics'] = self.val_metrics[selected_epoch]
+        if self.train_loader is not None:
+            train_dataset = getattr(self.train_loader, 'dataset', self.train_loader)
+            summary['train_keys'] = list(getattr(train_dataset, 'dataset_keys', []))
+        if self.val_loader is not None:
+            summary['val_keys'] = list(getattr(self.val_loader, 'dataset_keys', []))
+        summary_path = self.config.save_dir.joinpath('selection.json')
+        with open(summary_path, 'w') as f:
+            json.dump(summary, f, indent=2)
+        summary_path.chmod(0o777)
+
+    def evaluate(self, epoch_i, save_weights=False, score_dir=None, loader=None):
+        """Save frame importance scores in json format for val/test loaders."""
+        eval_loader = loader if loader is not None else self.test_loader
+        if eval_loader is None:
+            raise ValueError('An evaluation loader is required.')
         self.model.eval()
 
-        weights_save_path = self.config.score_dir.joinpath("weights.h5")
+        score_dir = Path(score_dir) if score_dir is not None else self.config.score_dir
+        if not os.path.exists(score_dir):
+            os.makedirs(score_dir)
+        weights_save_path = score_dir.joinpath("weights.h5")
         out_scores_dict = {}
-        for frame_features, video_name in tqdm(self.test_loader, desc='Evaluate', ncols=80, leave=False):
-            # [seq_len, input_size]
+        for frame_features, video_name in tqdm(eval_loader, desc='Evaluate', ncols=80, leave=False):
             frame_features = frame_features.view(-1, self.config.input_size).to(self.config.device)
 
             with torch.no_grad():
                 scores, attn_weights = self.model(frame_features)  # [1, seq_len]
                 scores = scores.squeeze(0).cpu().numpy().tolist()
                 attn_weights = attn_weights.cpu().numpy()
-
                 out_scores_dict[video_name] = scores
-
-            if not os.path.exists(self.config.score_dir):
-                os.makedirs(self.config.score_dir)
-
-            scores_save_path = self.config.score_dir.joinpath(f"{self.config.video_type}_{epoch_i}.json")
-            with open(scores_save_path, 'w') as f:
-                if self.config.verbose:
-                    tqdm.write(f'Saving score at {str(scores_save_path)}.')
-                json.dump(out_scores_dict, f)
-            scores_save_path.chmod(0o777)
 
             if save_weights:
                 with h5py.File(weights_save_path, 'a') as weights:
                     weights.create_dataset(f"{video_name}/epoch_{epoch_i}", data=attn_weights)
+
+        scores_save_path = score_dir.joinpath(f"{self.config.video_type}_{epoch_i}.json")
+        with open(scores_save_path, 'w') as f:
+            if self.config.verbose:
+                tqdm.write(f'Saving score at {str(scores_save_path)}.')
+            json.dump(out_scores_dict, f)
+        scores_save_path.chmod(0o777)
+        return scores_save_path
+
+    def evaluate_metrics(self, epoch_i, loader, score_dir):
+        """Evaluate a validation/test loader and return F1 for checkpoint selection."""
+        scores_path = self.evaluate(epoch_i, score_dir=score_dir, loader=loader)
+        metrics = self.compute_metrics(scores_path, include_rank=False)
+        metrics['epoch'] = int(epoch_i)
+        metrics_path = Path(score_dir).joinpath('metrics.jsonl')
+        with open(metrics_path, 'a') as f:
+            f.write(json.dumps(metrics) + '\n')
+        return metrics
+
+    def compute_metrics(self, scores_path, include_rank=True):
+        """Compute official F1 and, for final evaluation, strict rank metrics."""
+        eval_method = 'avg' if self.config.video_type.lower() == 'tvsum' else 'max'
+        dataset_path = Path(__file__).resolve().parents[1].joinpath(
+            'data', 'datasets', self.config.video_type,
+            'eccv16_dataset_' + self.config.video_type.lower() + '_google_pool5.h5'
+        )
+        with open(scores_path) as f:
+            data = json.loads(f.read())
+        keys = list(data.keys())
+        all_scores = [np.asarray(data[video_name]) for video_name in keys]
+
+        all_user_summary, all_shot_bound, all_nframes, all_positions = [], [], [], []
+        all_f_scores = []
+        with h5py.File(dataset_path, 'r') as hdf:
+            for video_name, scores in zip(keys, all_scores):
+                video_index = video_name[6:]
+                user_summary = np.array(hdf.get('video_' + video_index + '/user_summary'))
+                sb = np.array(hdf.get('video_' + video_index + '/change_points'))
+                n_frames = np.array(hdf.get('video_' + video_index + '/n_frames'))
+                positions = np.array(hdf.get('video_' + video_index + '/picks'))
+
+                all_user_summary.append(user_summary)
+                all_shot_bound.append(sb)
+                all_nframes.append(n_frames)
+                all_positions.append(positions)
+
+        all_summaries = generate_summary(all_shot_bound, all_scores, all_nframes, all_positions)
+        for video_index in range(len(all_summaries)):
+            summary = all_summaries[video_index]
+            user_summary = all_user_summary[video_index]
+            all_f_scores.append(evaluate_summary(summary, user_summary, eval_method))
+
+        metrics = {'fscore': float(np.mean(all_f_scores))}
+        if include_rank:
+            rank_metrics = compute_rank_metrics(
+                scores_path,
+                self.config.video_type,
+                dataset_path=dataset_path,
+                tvsum_anno_path=getattr(self.config, 'tvsum_anno_path', None),
+            )
+            metrics.update({
+                'kendall_tau': rank_metrics['kendall_tau'],
+                'spearman_rho': rank_metrics['spearman_rho'],
+                'rank_metrics': rank_metrics,
+            })
+        else:
+            metrics.update({
+                'kendall_tau': None,
+                'spearman_rho': None,
+                'rank_metrics': {'computed': False, 'reason': 'validation checkpoint selection uses F-score only'},
+            })
+        return metrics
 
 
 if __name__ == '__main__':

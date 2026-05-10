@@ -10,7 +10,7 @@ import argparse
 # arguments to run the script
 parser = argparse.ArgumentParser()
 parser.add_argument("--path", type=str,
-                    default='../PGL-SUM/Summaries/PGL-SUM/exp1/SumMe/results/split0',
+                    default='../PGL-SUM/experiments/results/exp1/SumMe/results/split0',
                     help="Path to the json files with the scores of the frames for each epoch")
 parser.add_argument("--dataset", type=str, default='SumMe', help="Dataset to be used")
 parser.add_argument("--eval", type=str, default="max", help="Eval method to be used for f_score reduction (max or avg)")

@@ -37,7 +37,7 @@ Original videos and annotations for each dataset are also available in the datas
 ## Training
 <div align="justify">
 
-To train the model using one of the aforementioned datasets and for a number of randomly created splits of the dataset (where in each split 80% of the data is used for training and 20% for testing) use the corresponding JSON file that is included in the [data/splits](/data/splits) directory. This file contains the 5 randomly-generated splits that were utilized in our experiments.
+To train the model using one of the aforementioned datasets and for a number of randomly created splits of the dataset (where in each split 80% of the data is used for training and 20% for testing) use the corresponding JSON file that is included in the [data/datasets/splits](/data/datasets/splits) directory. This file contains the 5 randomly-generated splits that were utilized in our experiments.
 
 For training the model using a single split, run:
 ```bash
@@ -105,7 +105,7 @@ We have released the [**trained models**](https://doi.org/10.5281/zenodo.5635735
 ``` bash
 sudo apt-get install unzip wget
 wget "https://zenodo.org/record/5635735/files/pretrained_models.zip?download=1" -O pretrained_models.zip
-unzip pretrained_models.zip -d inference
+mkdir -p experiments && unzip pretrained_models.zip -d experiments
 rm -f pretrained_models.zip
 ```
 Then, specify the PATHs for the [`model`](inference/inference.py#L57), the [`split_file`](inference/inference.py#L61) and the [`dataset`](inference/inference.py#L67) in use. Finally, run the script with the following syntax
@@ -126,6 +126,19 @@ Given the above pre-trained models, we present some additional evaluation result
 SumMe | - | - | 0.631 | 9.44 | 0.63
 TVSum | 0.206 | 0.157 | 0.488 | 9.44 | 1.17
 
+
+## Rank Metric Evaluation
+<div align="justify">
+
+Rank metrics are computed by repository-local scripts: [`evaluation/rank_metrics.py`](evaluation/rank_metrics.py) and [`evaluation/evaluate_rank.py`](evaluation/evaluate_rank.py). The implementation uses SciPy for the core statistics: `spearmanr(..., nan_policy="raise")` and Kendall tau-b via `kendalltau(rankdata(pred), rankdata(ref), variant="b", nan_policy="raise")` when the installed SciPy supports the `variant` keyword. Older SciPy versions expose tau-b as the default and are handled explicitly. Constant or too-short sequences are recorded as `null` and excluded from means.
+
+For SumMe, annotator 0/1 `user_summary` labels are averaged first to obtain a reference importance score per frame, then sampled at the dataset `picks` to match the model score granularity. For TVSum, the script requires the official `ydata-anno.tsv` annotations under `data/datasets/TVSum/ydata-anno.tsv` or via `--tvsum_anno_path`; the repository copy is exported from the official MIT `tvsum50_ver_1_1.tgz` package (`ydata-tvsum50.mat`). It normalizes each annotator by its maximum score, samples every 15 frames, computes correlations per annotator, averages annotators into a video-level score, and then averages videos into a fold-level score.
+
+```bash
+python evaluation/evaluate_rank.py --dataset SumMe --scores_path path/to/SumMe_epoch.json
+python evaluation/evaluate_rank.py --dataset TVSum --scores_path path/to/TVSum_epoch.json --tvsum_anno_path data/datasets/TVSum/ydata-anno.tsv
+```
+</div>
 
 ## Citation
 <div align="justify">
