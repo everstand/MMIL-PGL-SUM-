@@ -17,6 +17,7 @@ def compute_final_fscore(config, score_dir):
         '--path', str(score_dir),
         '--dataset', config.video_type,
         '--eval', eval_method,
+        '--dataset_root', str(config.dataset_root),
     ], check=True)
     with open(score_dir.joinpath('f_scores.txt')) as f:
         scores = json.loads(f.read())
@@ -71,17 +72,23 @@ if __name__ == '__main__':
     use_val_split = config.protocol == 'clean'
     train_loader = get_loader(config.mode, config.video_type, config.split_index,
                               use_val_split=use_val_split,
-                              val_ratio=config.val_ratio, val_seed=config.val_seed)
+                              val_ratio=config.val_ratio, val_seed=config.val_seed,
+                              dataset_root=config.dataset_root,
+                              splits_root=config.splits_root)
     val_loader = None
     test_loader = None
     if config.protocol == 'paper':
         test_config = get_config(mode='test')
         print(test_config)
-        test_loader = get_loader(test_config.mode, test_config.video_type, test_config.split_index)
+        test_loader = get_loader(test_config.mode, test_config.video_type, test_config.split_index,
+                                 dataset_root=config.dataset_root,
+                                 splits_root=config.splits_root)
     else:
         val_loader = get_loader('val', config.video_type, config.split_index,
                                 use_val_split=True,
-                                val_ratio=config.val_ratio, val_seed=config.val_seed)
+                                val_ratio=config.val_ratio, val_seed=config.val_seed,
+                                dataset_root=config.dataset_root,
+                                splits_root=config.splits_root)
         assert_disjoint('train_keys', loader_keys(train_loader), 'val_keys', loader_keys(val_loader))
 
     solver = Solver(config, train_loader, val_loader=val_loader, test_loader=test_loader)
@@ -97,7 +104,9 @@ if __name__ == '__main__':
         print(test_config)
         test_loader = get_loader(test_config.mode, test_config.video_type, test_config.split_index,
                                  use_val_split=True,
-                                 val_ratio=config.val_ratio, val_seed=config.val_seed)
+                                 val_ratio=config.val_ratio, val_seed=config.val_seed,
+                                 dataset_root=config.dataset_root,
+                                 splits_root=config.splits_root)
         assert_disjoint('train_keys', loader_keys(train_loader), 'test_keys', loader_keys(test_loader))
         assert_disjoint('val_keys', loader_keys(val_loader), 'test_keys', loader_keys(test_loader))
         solver.test_loader = test_loader

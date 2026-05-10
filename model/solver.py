@@ -247,9 +247,9 @@ class Solver(object):
     def compute_metrics(self, scores_path, include_rank=True):
         """Compute official F1 and, for final evaluation, strict rank metrics."""
         eval_method = 'avg' if self.config.video_type.lower() == 'tvsum' else 'max'
-        dataset_path = Path(__file__).resolve().parents[1].joinpath(
-            'data', 'datasets', self.config.video_type,
-            'eccv16_dataset_' + self.config.video_type.lower() + '_google_pool5.h5'
+        dataset_dir = 'SumMe' if self.config.video_type.lower() == 'summe' else 'TVSum'
+        dataset_path = Path(self.config.dataset_root) / dataset_dir / (
+            f'eccv16_dataset_{self.config.video_type.lower()}_google_pool5.h5'
         )
         with open(scores_path) as f:
             data = json.loads(f.read())

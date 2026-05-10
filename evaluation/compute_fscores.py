@@ -6,6 +6,8 @@ import h5py
 from evaluation_metrics import evaluate_summary
 from generate_summary import generate_summary
 import argparse
+from pathlib import Path
+
 
 # arguments to run the script
 parser = argparse.ArgumentParser()
@@ -14,15 +16,22 @@ parser.add_argument("--path", type=str,
                     help="Path to the json files with the scores of the frames for each epoch")
 parser.add_argument("--dataset", type=str, default='SumMe', help="Dataset to be used")
 parser.add_argument("--eval", type=str, default="max", help="Eval method to be used for f_score reduction (max or avg)")
+parser.add_argument(
+    "--dataset_root",
+    type=str,
+    default=str(Path(__file__).resolve().parents[1] / 'data' / 'datasets')
+)
 
 args = vars(parser.parse_args())
 path = args["path"]
 dataset = args["dataset"]
 eval_method = args["eval"]
+dataset_root = Path(args["dataset_root"])
 
 results = [f for f in listdir(path) if f.endswith(".json")]
 results.sort(key=lambda video: int(video[6:-5]))
-dataset_path = '../PGL-SUM/data/datasets/' + dataset + '/eccv16_dataset_' + dataset.lower() + '_google_pool5.h5'
+dataset_dir = 'SumMe' if dataset.lower() == 'summe' else 'TVSum'
+dataset_path = dataset_root / dataset_dir / f'eccv16_dataset_{dataset.lower()}_google_pool5.h5'
 
 f_score_epochs = []
 for epoch in results:                       # for each epoch ...

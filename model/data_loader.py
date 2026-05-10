@@ -5,6 +5,7 @@ import h5py
 import numpy as np
 import json
 import random
+from pathlib import Path
 
 
 def _inner_train_val_keys(train_keys, split_index, val_ratio=0.2, val_seed=0):
@@ -24,7 +25,7 @@ def _inner_train_val_keys(train_keys, split_index, val_ratio=0.2, val_seed=0):
 
 class VideoData(Dataset):
     def __init__(self, mode, video_type, split_index, use_val_split=False,
-                 val_ratio=0.2, val_seed=0):
+                 val_ratio=0.2, val_seed=0, dataset_root=None, splits_root=None):
         """Custom Dataset wrapper for frame features and ground-truth scores.
 
         Outer train/test keys always come from the official split JSON. When
@@ -33,21 +34,26 @@ class VideoData(Dataset):
         self.mode = mode.lower()
         if self.mode not in ('train', 'val', 'test'):
             raise ValueError("mode must be one of: train, val, test.")
+
         self.name = video_type.lower()
-        self.datasets = ['../PGL-SUM/data/datasets/SumMe/eccv16_dataset_summe_google_pool5.h5',
-                         '../PGL-SUM/data/datasets/TVSum/eccv16_dataset_tvsum_google_pool5.h5']
-        self.splits_filename = ['../PGL-SUM/data/datasets/splits/' + self.name + '_splits.json']
         self.split_index = split_index
         self.use_val_split = use_val_split
         self.val_ratio = val_ratio
         self.val_seed = val_seed
 
-        if 'summe' in self.splits_filename[0]:
-            self.filename = self.datasets[0]
-        elif 'tvsum' in self.splits_filename[0]:
-            self.filename = self.datasets[1]
+        dataset_root = Path(dataset_root)
+        splits_root = Path(splits_root)
 
-        with open(self.splits_filename[0]) as f:
+        dataset_dir = 'SumMe' if self.name == 'summe' else 'TVSum'
+        self.filename = dataset_root / dataset_dir / f'eccv16_dataset_{self.name}_google_pool5.h5'
+        self.splits_filename = splits_root / f'{self.name}_splits.json'
+
+        if not self.filename.exists():
+            raise FileNotFoundError(f'Dataset file not found: {self.filename}')
+        if not self.splits_filename.exists():
+            raise FileNotFoundError(f'Split file not found: {self.splits_filename}')
+
+        with open(self.splits_filename) as f:
             data = json.loads(f.read())
             for i, split in enumerate(data):
                 if i == self.split_index:
@@ -106,9 +112,15 @@ class VideoData(Dataset):
 
 
 def get_loader(mode, video_type, split_index, use_val_split=False,
-               val_ratio=0.2, val_seed=0):
-    vd = VideoData(mode, video_type, split_index, use_val_split=use_val_split,
-                   val_ratio=val_ratio, val_seed=val_seed)
+               val_ratio=0.2, val_seed=0, dataset_root=None, splits_root=None):
+    vd = VideoData(
+        mode, video_type, split_index,
+        use_val_split=use_val_split,
+        val_ratio=val_ratio,
+        val_seed=val_seed,
+        dataset_root=dataset_root,
+        splits_root=splits_root,
+    )
     if mode.lower() == 'train':
         return DataLoader(vd, batch_size=1, shuffle=True)
     return vd
