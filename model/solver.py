@@ -85,62 +85,26 @@ class Solver(object):
 
     criterion = nn.MSELoss()
 
-    def build_train_supervision(self, target):
-        """Build train-time supervision tensors without changing evaluation targets."""
-        target = target.detach().float().view(-1)
-        if self.config.supervision_setting == 'supervised':
-            return {'target': target}
-
-        if self.config.weak_label_mode != 'top_bottom':
-            raise ValueError(f'Unsupported weak_label_mode: {self.config.weak_label_mode}')
-
-        num_frames = int(target.numel())
-        pos_count = max(1, int(round(num_frames * self.config.weak_pos_ratio)))
-        neg_count = max(1, int(round(num_frames * self.config.weak_neg_ratio)))
-        if pos_count + neg_count >= num_frames:
-            neg_count = max(1, num_frames - pos_count - 1)
-        if pos_count + neg_count >= num_frames:
-            pos_count = max(1, num_frames - neg_count - 1)
-        if pos_count <= 0 or neg_count <= 0:
-            raise ValueError('Weak supervision requires at least one positive and one negative frame.')
-
-        sorted_idx = torch.argsort(target)
-        neg_idx = sorted_idx[:neg_count]
-        pos_idx = sorted_idx[-pos_count:]
-
-        weak_target = torch.zeros_like(target)
-        weak_target[pos_idx] = 1.0
-        weak_mask = torch.zeros_like(target, dtype=torch.bool)
-        weak_mask[pos_idx] = True
-        weak_mask[neg_idx] = True
-        pos_mask = torch.zeros_like(target, dtype=torch.bool)
-        neg_mask = torch.zeros_like(target, dtype=torch.bool)
-        pos_mask[pos_idx] = True
-        neg_mask[neg_idx] = True
-        return {
-            'target': weak_target,
-            'mask': weak_mask,
-            'pos_mask': pos_mask,
-            'neg_mask': neg_mask,
-        }
-
-    def compute_train_loss(self, output, target):
+    def compute_train_loss(self, output, target, weak_mask=None, pos_mask=None, neg_mask=None):
         """Compute train loss under the selected supervision paradigm."""
         output = output.view(-1)
-        supervision = self.build_train_supervision(target)
+        target = target.view(-1)
         if self.config.supervision_setting == 'supervised':
-            loss = self.criterion(output, supervision['target'])
+            loss = self.criterion(output, target)
             return loss, {'loss_mse': float(loss.detach().cpu().item())}
 
-        weak_target = supervision['target']
-        weak_mask = supervision['mask']
-        pos_mask = supervision['pos_mask']
-        neg_mask = supervision['neg_mask']
-        weak_bce = F.binary_cross_entropy(output[weak_mask], weak_target[weak_mask])
-        pos_scores = output[pos_mask]
-        neg_scores = output[neg_mask]
-        rank_margin = self.config.weak_rank_margin - pos_scores.unsqueeze(1) + neg_scores.unsqueeze(0)
-        weak_rank = torch.relu(rank_margin).mean()
+        weak_mask = weak_mask.view(-1).bool()
+        pos_mask = pos_mask.view(-1).bool()
+        neg_mask = neg_mask.view(-1).bool()
+        if int(weak_mask.sum().item()) <= 0:
+            raise ValueError('weak_mask.sum() must be > 0 for weak supervision.')
+
+        weak_bce = F.binary_cross_entropy(output[weak_mask], target[weak_mask])
+        if pos_mask.any() and neg_mask.any():
+            rank_margin = self.config.weak_rank_margin - output[pos_mask].unsqueeze(1) + output[neg_mask].unsqueeze(0)
+            weak_rank = torch.relu(rank_margin).mean()
+        else:
+            weak_rank = output.new_tensor(0.0)
         loss = weak_bce + self.config.weak_rank_weight * weak_rank
         return loss, {
             'loss_bce': float(weak_bce.detach().cpu().item()),
@@ -166,13 +130,21 @@ class Solver(object):
 
                 self.optimizer.zero_grad()
                 for _ in trange(batch_size, desc='Video', ncols=80, leave=False):
-                    frame_features, target = next(iterator)
-
-                    frame_features = frame_features.to(self.config.device)
-                    target = target.to(self.config.device)
+                    batch = next(iterator)
+                    frame_features = batch['frame_features'].to(self.config.device)
+                    target = batch['target'].to(self.config.device)
+                    weak_mask = batch['mask'].to(self.config.device)
+                    pos_mask = batch['pos_mask'].to(self.config.device)
+                    neg_mask = batch['neg_mask'].to(self.config.device)
 
                     output, weights = self.model(frame_features.squeeze(0))
-                    loss, loss_components = self.compute_train_loss(output.squeeze(0), target.squeeze(0))
+                    loss, loss_components = self.compute_train_loss(
+                        output.squeeze(0),
+                        target.squeeze(0),
+                        weak_mask=weak_mask.squeeze(0),
+                        pos_mask=pos_mask.squeeze(0),
+                        neg_mask=neg_mask.squeeze(0),
+                    )
 
                     if self.config.verbose:
                         tqdm.write(f'[{epoch_i}] loss: {loss.item()}')

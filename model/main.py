@@ -70,43 +70,67 @@ if __name__ == '__main__':
     print(config)
     print('Currently selected split_index:', config.split_index)
     use_val_split = config.protocol == 'clean'
-    train_loader = get_loader(config.mode, config.video_type, config.split_index,
-                              use_val_split=use_val_split,
-                              val_ratio=config.val_ratio, val_seed=config.val_seed,
-                              dataset_root=config.dataset_root,
-                              splits_root=config.splits_root)
+    train_loader = get_loader(
+        config.mode, config.video_type, config.split_index,
+        use_val_split=use_val_split,
+        val_ratio=config.val_ratio, val_seed=config.val_seed,
+        dataset_root=config.dataset_root,
+        splits_root=config.splits_root,
+        supervision_setting=config.supervision_setting,
+        weak_labels_path=config.weak_labels_path,
+        weak_pos_ratio=config.weak_pos_ratio,
+        weak_neg_ratio=config.weak_neg_ratio,
+    )
     val_loader = None
     test_loader = None
     if config.protocol == 'paper':
         test_config = get_config(mode='test')
         print(test_config)
-        test_loader = get_loader(test_config.mode, test_config.video_type, test_config.split_index,
-                                 dataset_root=config.dataset_root,
-                                 splits_root=config.splits_root)
+        test_loader = get_loader(
+            test_config.mode, test_config.video_type, test_config.split_index,
+            dataset_root=config.dataset_root,
+            splits_root=config.splits_root,
+            supervision_setting=config.supervision_setting,
+            weak_labels_path=config.weak_labels_path,
+            weak_pos_ratio=config.weak_pos_ratio,
+            weak_neg_ratio=config.weak_neg_ratio,
+        )
     else:
-        val_loader = get_loader('val', config.video_type, config.split_index,
-                                use_val_split=True,
-                                val_ratio=config.val_ratio, val_seed=config.val_seed,
-                                dataset_root=config.dataset_root,
-                                splits_root=config.splits_root)
+        val_loader = get_loader(
+            'val', config.video_type, config.split_index,
+            use_val_split=True,
+            val_ratio=config.val_ratio, val_seed=config.val_seed,
+            dataset_root=config.dataset_root,
+            splits_root=config.splits_root,
+            supervision_setting=config.supervision_setting,
+            weak_labels_path=config.weak_labels_path,
+            weak_pos_ratio=config.weak_pos_ratio,
+            weak_neg_ratio=config.weak_neg_ratio,
+        )
         assert_disjoint('train_keys', loader_keys(train_loader), 'val_keys', loader_keys(val_loader))
 
     solver = Solver(config, train_loader, val_loader=val_loader, test_loader=test_loader)
 
     solver.build()
     if config.protocol == 'paper':
-        solver.evaluate(-1)  # evaluates summaries using the initial random weights
+        solver.evaluate(-1)
         solver.train()
     else:
         selected_epoch = solver.train()
         print(f'Selected epoch: {selected_epoch} ({config.selection_metric})')
         test_config = get_config(mode='test')
         print(test_config)
-        test_loader = get_loader(test_config.mode, test_config.video_type, test_config.split_index,
-                                 use_val_split=True,
-                                 val_ratio=config.val_ratio, val_seed=config.val_seed,
-                                 dataset_root=config.dataset_root,
-                                 splits_root=config.splits_root)
+        test_loader = get_loader(
+            test_config.mode, test_config.video_type, test_config.split_index,
+            use_val_split=True,
+            val_ratio=config.val_ratio, val_seed=config.val_seed,
+            dataset_root=config.dataset_root,
+            splits_root=config.splits_root,
+            supervision_setting=config.supervision_setting,
+            weak_labels_path=config.weak_labels_path,
+            weak_pos_ratio=config.weak_pos_ratio,
+            weak_neg_ratio=config.weak_neg_ratio,
+        )
         assert_disjoint('train_keys', loader_keys(train_loader), 'test_keys', loader_keys(test_loader))
         assert_disjoint('val_keys', loader_keys(val_loader), 'test_keys', loader_keys(test_loader))
         solver.test_loader = test_loader
@@ -122,4 +146,3 @@ if __name__ == '__main__':
             json.dump(final_metrics, f, indent=2)
         update_final_summary(config, selected_epoch, final_metrics, test_loader)
         print(f'Final test metrics: {final_metrics}')
-# tensorboard --logdir '../PGL-SUM/experiments/results/'

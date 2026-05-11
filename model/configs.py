@@ -8,6 +8,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DATASET_ROOT = REPO_ROOT / 'data' / 'datasets'
 DEFAULT_SPLITS_ROOT = DEFAULT_DATASET_ROOT / 'splits'
 DEFAULT_EXP_ROOT = REPO_ROOT / 'experiments' / 'results' / 'exp1'
+DEFAULT_WEAK_LABELS_ROOT = REPO_ROOT / 'data' / 'weak_labels'
 
 
 def str2bool(v):
@@ -36,6 +37,7 @@ class Config(object):
         self.dataset_root = Path(self.dataset_root)
         self.splits_root = Path(self.splits_root)
         self.tvsum_anno_path = Path(self.tvsum_anno_path)
+        self.weak_labels_root = Path(self.weak_labels_root)
 
         self.protocol = self.protocol.lower()
         if self.protocol not in ('paper', 'clean'):
@@ -51,6 +53,7 @@ class Config(object):
         self.supervision_setting = self.supervision_setting.lower()
         if self.supervision_setting not in ('supervised', 'weak'):
             raise ValueError("supervision_setting must be either 'supervised' or 'weak'.")
+        self.weak_labels_path = None
         if not 0.0 < self.weak_pos_ratio < 1.0:
             raise ValueError("weak_pos_ratio must be in (0, 1).")
         if not 0.0 < self.weak_neg_ratio < 1.0:
@@ -61,6 +64,10 @@ class Config(object):
             raise ValueError("weak_rank_margin must be >= 0.")
         if self.weak_rank_weight < 0.0:
             raise ValueError("weak_rank_weight must be >= 0.")
+        if self.supervision_setting == 'weak':
+            self.weak_labels_path = self.weak_labels_root / f'{self.video_type.lower()}_shot_utility.npy'
+            if not self.weak_labels_path.exists():
+                raise FileNotFoundError(f'Weak label file not found: {self.weak_labels_path}')
 
         self.set_dataset_dir(self.video_type)
 
@@ -112,15 +119,15 @@ def get_config(parse=True, **optional_kwargs):
         default=str(DEFAULT_DATASET_ROOT / 'TVSum' / 'ydata-anno.tsv'),
         help='Path to official TVSum ydata annotation TSV for rank metrics'
     )
-    parser.add_argument('--supervision_setting', type=str, default='supervised',
+    parser.add_argument('--supervision_setting', type=str, default='weak',
                         choices=['supervised', 'weak'],
-                        help='Training supervision paradigm; weak uses coarse labels derived from train-split gtscore ranks')
-    parser.add_argument('--weak_label_mode', type=str, default='top_bottom', choices=['top_bottom'],
-                        help='Weak-label construction strategy from train-split gtscore ranks')
+                        help='Training supervision paradigm; weak requires external weak labels and never uses gtscore during training')
+    parser.add_argument('--weak_labels_root', type=str, default=str(DEFAULT_WEAK_LABELS_ROOT),
+                        help='Directory containing external weak label files such as summe_shot_utility.npy and tvsum_shot_utility.npy')
     parser.add_argument('--weak_pos_ratio', type=float, default=0.15,
-                        help='Top ratio of frames treated as positive weak labels in weak supervision')
+                        help='Top ratio of externally weak-labeled positions treated as positive for pairwise ranking')
     parser.add_argument('--weak_neg_ratio', type=float, default=0.15,
-                        help='Bottom ratio of frames treated as negative weak labels in weak supervision')
+                        help='Bottom ratio of externally weak-labeled positions treated as negative for pairwise ranking')
     parser.add_argument('--weak_rank_margin', type=float, default=0.1,
                         help='Margin used by the weak pairwise ranking loss')
     parser.add_argument('--weak_rank_weight', type=float, default=1.0,
