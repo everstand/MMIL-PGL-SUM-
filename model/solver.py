@@ -7,6 +7,7 @@ import numpy as np
 import os
 import random
 import json
+import math
 import h5py
 import sys
 from pathlib import Path
@@ -118,18 +119,21 @@ class Solver(object):
 
             loss_history = []
             component_history = {}
-            if len(self.train_loader) == 0:
+            num_train_samples = len(self.train_loader)
+            if num_train_samples == 0:
                 raise ValueError('The training set is empty.')
-            batch_size = min(self.config.batch_size, len(self.train_loader))
-            num_batches = int(len(self.train_loader) / batch_size)  # full-batch or mini batch
+            effective_batch_size = min(self.config.batch_size, num_train_samples)
+            num_batches = math.ceil(num_train_samples / effective_batch_size)
             iterator = iter(self.train_loader)
+            processed = 0
             for _ in trange(num_batches, desc='Batch', ncols=80, leave=False):
+                current_batch_size = min(effective_batch_size, num_train_samples - processed)
                 # ---- Training ... ----#
                 if self.config.verbose:
                     tqdm.write('Time to train the model...')
 
                 self.optimizer.zero_grad()
-                for _ in trange(batch_size, desc='Video', ncols=80, leave=False):
+                for _ in trange(current_batch_size, desc='Video', ncols=80, leave=False):
                     batch = next(iterator)
                     frame_features = batch['frame_features'].to(self.config.device)
                     target = batch['target'].to(self.config.device)
@@ -150,10 +154,11 @@ class Solver(object):
                         tqdm.write(f'[{epoch_i}] loss: {loss.item()}')
 
                     loss.backward()
+                    processed += 1
                     loss_history.append(loss.detach())
                     for name, value in loss_components.items():
                         component_history.setdefault(name, []).append(value)
-                # Update model parameters every 'batch_size' iterations
+                # Update model parameters after the current mini-batch, including the tail batch
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip)
                 self.optimizer.step()
 

@@ -89,6 +89,14 @@ def _expand_shot_utility_to_features(video_name, video_payload, hdf):
     _validate_finite(f'{video_name} weak_target', weak_target)
     if int(weak_mask.sum()) <= 0:
         raise ValueError(f'{video_name} weak_mask.sum() must be > 0.')
+    valid_target = weak_target[weak_mask]
+    target_min = float(valid_target.min())
+    target_max = float(valid_target.max())
+    if target_min < -1e-6 or target_max > 1.0 + 1e-6:
+        raise ValueError(
+            f'{video_name} weak_target on labeled positions must lie in [0, 1] for BCE: '
+            f'min={target_min:.6f}, max={target_max:.6f}.'
+        )
     return weak_target, weak_mask
 
 
