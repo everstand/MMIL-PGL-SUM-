@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 import os
@@ -84,12 +85,75 @@ class Solver(object):
 
     criterion = nn.MSELoss()
 
+    def build_train_supervision(self, target):
+        """Build train-time supervision tensors without changing evaluation targets."""
+        target = target.detach().float().view(-1)
+        if self.config.supervision_setting == 'supervised':
+            return {'target': target}
+
+        if self.config.weak_label_mode != 'top_bottom':
+            raise ValueError(f'Unsupported weak_label_mode: {self.config.weak_label_mode}')
+
+        num_frames = int(target.numel())
+        pos_count = max(1, int(round(num_frames * self.config.weak_pos_ratio)))
+        neg_count = max(1, int(round(num_frames * self.config.weak_neg_ratio)))
+        if pos_count + neg_count >= num_frames:
+            neg_count = max(1, num_frames - pos_count - 1)
+        if pos_count + neg_count >= num_frames:
+            pos_count = max(1, num_frames - neg_count - 1)
+        if pos_count <= 0 or neg_count <= 0:
+            raise ValueError('Weak supervision requires at least one positive and one negative frame.')
+
+        sorted_idx = torch.argsort(target)
+        neg_idx = sorted_idx[:neg_count]
+        pos_idx = sorted_idx[-pos_count:]
+
+        weak_target = torch.zeros_like(target)
+        weak_target[pos_idx] = 1.0
+        weak_mask = torch.zeros_like(target, dtype=torch.bool)
+        weak_mask[pos_idx] = True
+        weak_mask[neg_idx] = True
+        pos_mask = torch.zeros_like(target, dtype=torch.bool)
+        neg_mask = torch.zeros_like(target, dtype=torch.bool)
+        pos_mask[pos_idx] = True
+        neg_mask[neg_idx] = True
+        return {
+            'target': weak_target,
+            'mask': weak_mask,
+            'pos_mask': pos_mask,
+            'neg_mask': neg_mask,
+        }
+
+    def compute_train_loss(self, output, target):
+        """Compute train loss under the selected supervision paradigm."""
+        output = output.view(-1)
+        supervision = self.build_train_supervision(target)
+        if self.config.supervision_setting == 'supervised':
+            loss = self.criterion(output, supervision['target'])
+            return loss, {'loss_mse': float(loss.detach().cpu().item())}
+
+        weak_target = supervision['target']
+        weak_mask = supervision['mask']
+        pos_mask = supervision['pos_mask']
+        neg_mask = supervision['neg_mask']
+        weak_bce = F.binary_cross_entropy(output[weak_mask], weak_target[weak_mask])
+        pos_scores = output[pos_mask]
+        neg_scores = output[neg_mask]
+        rank_margin = self.config.weak_rank_margin - pos_scores.unsqueeze(1) + neg_scores.unsqueeze(0)
+        weak_rank = torch.relu(rank_margin).mean()
+        loss = weak_bce + self.config.weak_rank_weight * weak_rank
+        return loss, {
+            'loss_bce': float(weak_bce.detach().cpu().item()),
+            'loss_rank': float(weak_rank.detach().cpu().item()),
+        }
+
     def train(self):
         """ Main function to train the PGL-SUM model. """
         for epoch_i in trange(self.config.n_epochs, desc='Epoch', ncols=80):
             self.model.train()
 
             loss_history = []
+            component_history = {}
             if len(self.train_loader) == 0:
                 raise ValueError('The training set is empty.')
             batch_size = min(self.config.batch_size, len(self.train_loader))
@@ -108,13 +172,15 @@ class Solver(object):
                     target = target.to(self.config.device)
 
                     output, weights = self.model(frame_features.squeeze(0))
-                    loss = self.criterion(output.squeeze(0), target.squeeze(0))
+                    loss, loss_components = self.compute_train_loss(output.squeeze(0), target.squeeze(0))
 
                     if self.config.verbose:
                         tqdm.write(f'[{epoch_i}] loss: {loss.item()}')
 
                     loss.backward()
                     loss_history.append(loss.detach())
+                    for name, value in loss_components.items():
+                        component_history.setdefault(name, []).append(value)
                 # Update model parameters every 'batch_size' iterations
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip)
                 self.optimizer.step()
@@ -127,12 +193,16 @@ class Solver(object):
                 tqdm.write('Plotting...')
 
             self.writer.update_loss(loss, epoch_i, 'loss_epoch')
+            epoch_components = {name: float(np.mean(values)) for name, values in component_history.items()}
+            for name, value in epoch_components.items():
+                self.writer.update_loss(value, epoch_i, name)
             if not os.path.exists(self.config.save_dir):
                 os.makedirs(self.config.save_dir)
             self.train_losses.append(float(loss.detach().cpu().item()))
             if self.config.save_checkpoints:
                 self.save_checkpoint(epoch_i)
 
+            metrics = None
             if self.config.protocol == 'paper':
                 self.evaluate(epoch_i)
             elif self.config.selection_metric == 'val_fscore':
@@ -145,6 +215,24 @@ class Solver(object):
                     best_epoch = int(np.argmax([m['fscore'] for m in self.val_metrics]))
                     if epoch_i - best_epoch >= patience:
                         break
+
+            log_parts = [f'Epoch {epoch_i + 1:03d}/{self.config.n_epochs:03d}',
+                         f'loss={float(loss.detach().cpu().item()):.4f}']
+            for name in ('loss_mse', 'loss_bce', 'loss_rank'):
+                if name in epoch_components:
+                    label = name.replace('loss_', '')
+                    log_parts.append(f'{label}={epoch_components[name]:.4f}')
+            if metrics is not None:
+                log_parts.append(f'val_F1={metrics["fscore"]:.4f}')
+                tau = metrics.get('kendall_tau')
+                if tau is not None:
+                    log_parts.append(f'val_Tau={tau:.4f}')
+                rho = metrics.get('spearman_rho')
+                if rho is not None:
+                    log_parts.append(f'val_Rho={rho:.4f}')
+                best_val = max(m['fscore'] for m in self.val_metrics)
+                log_parts.append(f'best_val_F1={best_val:.4f}')
+            print(' | '.join(log_parts), flush=True)
 
         if self.writer is not None:
             self.writer.close()
@@ -181,6 +269,12 @@ class Solver(object):
         """Persist clean/paper selection metadata for reproducibility."""
         summary = {
             'protocol': self.config.protocol,
+            'supervision_setting': self.config.supervision_setting,
+            'weak_label_mode': getattr(self.config, 'weak_label_mode', None),
+            'weak_pos_ratio': getattr(self.config, 'weak_pos_ratio', None),
+            'weak_neg_ratio': getattr(self.config, 'weak_neg_ratio', None),
+            'weak_rank_margin': getattr(self.config, 'weak_rank_margin', None),
+            'weak_rank_weight': getattr(self.config, 'weak_rank_weight', None),
             'selection_metric': self.config.selection_metric,
             'selected_epoch': int(selected_epoch),
             'selected_train_loss': self.train_losses[selected_epoch],

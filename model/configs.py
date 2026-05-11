@@ -48,6 +48,19 @@ class Config(object):
             raise ValueError("val_ratio must be in (0, 1).")
         if self.early_stop_patience < 0:
             raise ValueError("early_stop_patience must be >= 0.")
+        self.supervision_setting = self.supervision_setting.lower()
+        if self.supervision_setting not in ('supervised', 'weak'):
+            raise ValueError("supervision_setting must be either 'supervised' or 'weak'.")
+        if not 0.0 < self.weak_pos_ratio < 1.0:
+            raise ValueError("weak_pos_ratio must be in (0, 1).")
+        if not 0.0 < self.weak_neg_ratio < 1.0:
+            raise ValueError("weak_neg_ratio must be in (0, 1).")
+        if self.weak_pos_ratio + self.weak_neg_ratio >= 1.0:
+            raise ValueError("weak_pos_ratio + weak_neg_ratio must be < 1.0.")
+        if self.weak_rank_margin < 0.0:
+            raise ValueError("weak_rank_margin must be >= 0.")
+        if self.weak_rank_weight < 0.0:
+            raise ValueError("weak_rank_weight must be >= 0.")
 
         self.set_dataset_dir(self.video_type)
 
@@ -80,7 +93,7 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--verbose', type=str2bool, default='false', help='Print or not training messages')
     parser.add_argument('--video_type', type=str, default='SumMe', help='Dataset to be used')
     parser.add_argument('--protocol', type=str, default='clean', choices=['paper', 'clean'],
-                        help='paper evaluates test each epoch; clean uses inner validation for selection and tests once')
+                        help='Default mainline protocol is clean; use paper only when explicitly reproducing legacy test-in-selection behavior.')
     parser.add_argument('--exp_root', type=str, default=str(DEFAULT_EXP_ROOT),
                         help='Root directory where experiment logs, scores and checkpoints are stored')
     parser.add_argument('--dataset_root', type=str, default=str(DEFAULT_DATASET_ROOT),
@@ -99,6 +112,19 @@ def get_config(parse=True, **optional_kwargs):
         default=str(DEFAULT_DATASET_ROOT / 'TVSum' / 'ydata-anno.tsv'),
         help='Path to official TVSum ydata annotation TSV for rank metrics'
     )
+    parser.add_argument('--supervision_setting', type=str, default='supervised',
+                        choices=['supervised', 'weak'],
+                        help='Training supervision paradigm; weak uses coarse labels derived from train-split gtscore ranks')
+    parser.add_argument('--weak_label_mode', type=str, default='top_bottom', choices=['top_bottom'],
+                        help='Weak-label construction strategy from train-split gtscore ranks')
+    parser.add_argument('--weak_pos_ratio', type=float, default=0.15,
+                        help='Top ratio of frames treated as positive weak labels in weak supervision')
+    parser.add_argument('--weak_neg_ratio', type=float, default=0.15,
+                        help='Bottom ratio of frames treated as negative weak labels in weak supervision')
+    parser.add_argument('--weak_rank_margin', type=float, default=0.1,
+                        help='Margin used by the weak pairwise ranking loss')
+    parser.add_argument('--weak_rank_weight', type=float, default=1.0,
+                        help='Weight applied to the weak pairwise ranking loss term')
 
     # Model
     parser.add_argument('--input_size', type=int, default=1024, help='Feature size expected in the input')
