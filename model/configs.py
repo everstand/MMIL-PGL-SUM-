@@ -42,8 +42,12 @@ class Config(object):
         self.protocol = self.protocol.lower()
         if self.protocol not in ('paper', 'clean'):
             raise ValueError("protocol must be either 'paper' or 'clean'.")
-        if self.selection_metric != 'val_fscore':
-            raise ValueError("selection_metric must be val_fscore.")
+        if self.selection_metric not in ('val_fscore', 'val_combo'):
+            raise ValueError("selection_metric must be one of: val_fscore, val_combo.")
+        if self.selection_alpha < 0.0:
+            raise ValueError("selection_alpha must be >= 0.")
+        if self.selection_beta < 0.0:
+            raise ValueError("selection_beta must be >= 0.")
         if self.protocol == 'clean' and not self.save_checkpoints:
             raise ValueError("clean protocol requires --save_checkpoints true.")
         if not 0.0 < self.val_ratio < 1.0:
@@ -181,8 +185,12 @@ def get_config(parse=True, **optional_kwargs):
     parser.add_argument('--save_checkpoints', type=str2bool, default='true',
                         help='Save model parameters after each training epoch')
     parser.add_argument('--selection_metric', type=str, default='val_fscore',
-                        choices=['val_fscore'],
-                        help='Checkpoint selection metric; clean protocol uses validation F-score')
+                        choices=['val_fscore', 'val_combo'],
+                        help='Checkpoint selection metric; val_combo uses normalized val F1 + alpha * val Tau + beta * val Rho')
+    parser.add_argument('--selection_alpha', type=float, default=0.5,
+                        help='Weight of validation Kendall Tau in val_combo checkpoint selection')
+    parser.add_argument('--selection_beta', type=float, default=0.5,
+                        help='Weight of validation Spearman Rho in val_combo checkpoint selection')
 
     if parse:
         kwargs = parser.parse_args()

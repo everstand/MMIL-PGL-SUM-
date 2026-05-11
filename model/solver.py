@@ -87,6 +87,28 @@ class Solver(object):
 
     criterion = nn.MSELoss()
 
+    @staticmethod
+    def _metric_or_zero(value):
+        if value is None:
+            return 0.0
+        value = float(value)
+        if not np.isfinite(value):
+            return 0.0
+        return value
+
+    def compute_selection_score(self, metrics):
+        f1 = self._metric_or_zero(metrics.get('fscore'))
+        if self.config.selection_metric == 'val_fscore':
+            return f1
+
+        tau = self._metric_or_zero(metrics.get('kendall_tau'))
+        rho = self._metric_or_zero(metrics.get('spearman_rho'))
+        return (
+            f1 / 100.0
+            + self.config.selection_alpha * tau
+            + self.config.selection_beta * rho
+        )
+
     def compute_step_reg_loss(self, pred_step, step_target, step_mask):
         pred_step = pred_step.view(-1)
         step_target = step_target.view(-1)
@@ -281,14 +303,20 @@ class Solver(object):
             metrics = None
             if self.config.protocol == 'paper':
                 self.evaluate(epoch_i)
-            elif self.config.selection_metric == 'val_fscore':
+            elif self.config.selection_metric in ('val_fscore', 'val_combo'):
                 metrics = self.evaluate_metrics(epoch_i, self.val_loader,
                                                 self.config.score_dir.joinpath('val'))
                 self.val_metrics.append(metrics)
                 self.writer.update_loss(metrics['fscore'], epoch_i, 'val_fscore')
+                if metrics.get('kendall_tau') is not None:
+                    self.writer.update_loss(metrics['kendall_tau'], epoch_i, 'val_tau')
+                if metrics.get('spearman_rho') is not None:
+                    self.writer.update_loss(metrics['spearman_rho'], epoch_i, 'val_rho')
+                if metrics.get('selection_score') is not None:
+                    self.writer.update_loss(metrics['selection_score'], epoch_i, 'val_selection_score')
                 patience = self.config.early_stop_patience
                 if patience > 0:
-                    best_epoch = int(np.argmax([m['fscore'] for m in self.val_metrics]))
+                    best_epoch = int(np.argmax([m['selection_score'] for m in self.val_metrics]))
                     if epoch_i - best_epoch >= patience:
                         break
 
@@ -306,8 +334,10 @@ class Solver(object):
                 rho = metrics.get('spearman_rho')
                 if rho is not None:
                     log_parts.append(f'val_Rho={rho:.4f}')
-                best_val = max(m['fscore'] for m in self.val_metrics)
-                log_parts.append(f'best_val_F1={best_val:.4f}')
+                if metrics.get('selection_score') is not None:
+                    log_parts.append(f'val_Sel={metrics["selection_score"]:.4f}')
+                best_val = max(m['selection_score'] for m in self.val_metrics)
+                log_parts.append(f'best_val_Sel={best_val:.4f}')
             print(' | '.join(log_parts), flush=True)
 
         if self.writer is not None:
@@ -338,8 +368,8 @@ class Solver(object):
     def select_epoch(self):
         """Select the checkpoint epoch without looking at the test set."""
         if not self.val_metrics:
-            raise ValueError('val_fscore selection requires validation metrics.')
-        return int(np.argmax(np.asarray([m['fscore'] for m in self.val_metrics])))
+            raise ValueError('validation-based selection requires validation metrics.')
+        return int(np.argmax(np.asarray([m['selection_score'] for m in self.val_metrics])))
 
     def save_training_summary(self, selected_epoch):
         """Persist clean/paper selection metadata for reproducibility."""
@@ -352,6 +382,8 @@ class Solver(object):
             'weak_rank_margin': getattr(self.config, 'weak_rank_margin', None),
             'weak_rank_weight': getattr(self.config, 'weak_rank_weight', None),
             'selection_metric': self.config.selection_metric,
+            'selection_alpha': self.config.selection_alpha,
+            'selection_beta': self.config.selection_beta,
             'weak_target_norm': getattr(self.config, 'weak_target_norm', None),
             'reg_loss': getattr(self.config, 'reg_loss', None),
             'lambda_step_reg': getattr(self.config, 'lambda_step_reg', None),
@@ -380,6 +412,7 @@ class Solver(object):
         }
         if self.val_metrics:
             summary['selected_val_metrics'] = self.val_metrics[selected_epoch]
+            summary['selected_selection_score'] = self.val_metrics[selected_epoch].get('selection_score')
         if self.train_loader is not None:
             train_dataset = getattr(self.train_loader, 'dataset', self.train_loader)
             summary['train_keys'] = list(getattr(train_dataset, 'dataset_keys', []))
@@ -424,10 +457,12 @@ class Solver(object):
         return scores_save_path
 
     def evaluate_metrics(self, epoch_i, loader, score_dir):
-        """Evaluate a validation/test loader and return F1 for checkpoint selection."""
+        """Evaluate a validation/test loader and return metrics for checkpoint selection."""
         scores_path = self.evaluate(epoch_i, score_dir=score_dir, loader=loader)
-        metrics = self.compute_metrics(scores_path, include_rank=False)
+        metrics = self.compute_metrics(scores_path, include_rank=True)
         metrics['epoch'] = int(epoch_i)
+        metrics['selection_metric'] = self.config.selection_metric
+        metrics['selection_score'] = self.compute_selection_score(metrics)
         metrics_path = Path(score_dir).joinpath('metrics.jsonl')
         with open(metrics_path, 'a') as f:
             f.write(json.dumps(metrics) + '\n')
