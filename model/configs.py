@@ -54,6 +54,23 @@ class Config(object):
         if self.supervision_setting not in ('supervised', 'weak'):
             raise ValueError("supervision_setting must be either 'supervised' or 'weak'.")
         self.weak_labels_path = None
+        self.weak_target_norm = self.weak_target_norm.lower()
+        if self.weak_target_norm not in ('none', 'per_video_minmax'):
+            raise ValueError("weak_target_norm must be one of: none, per_video_minmax.")
+        self.reg_loss = self.reg_loss.lower()
+        if self.reg_loss not in ('mse', 'huber'):
+            raise ValueError("reg_loss must be one of: mse, huber.")
+        if self.lambda_step_reg < 0.0:
+            raise ValueError("lambda_step_reg must be >= 0.")
+        if self.lambda_shot_aux < 0.0:
+            raise ValueError("lambda_shot_aux must be >= 0.")
+        self.shot_pool = self.shot_pool.lower()
+        if self.shot_pool not in ('mean',):
+            raise ValueError("shot_pool must be one of: mean.")
+        if self.lambda_rankcorr < 0.0:
+            raise ValueError("lambda_rankcorr must be >= 0.")
+        if self.rankcorr_tau <= 0.0:
+            raise ValueError("rankcorr_tau must be > 0.")
         if not 0.0 < self.weak_pos_ratio < 1.0:
             raise ValueError("weak_pos_ratio must be in (0, 1).")
         if not 0.0 < self.weak_neg_ratio < 1.0:
@@ -124,6 +141,17 @@ def get_config(parse=True, **optional_kwargs):
                         help='Training supervision paradigm; weak requires external weak labels and never uses gtscore during training')
     parser.add_argument('--weak_labels_root', type=str, default=str(DEFAULT_WEAK_LABELS_ROOT),
                         help='Directory containing external weak label files such as summe_shot_utility.npy and tvsum_shot_utility.npy')
+    parser.add_argument('--weak_target_norm', type=str, default='per_video_minmax',
+                        choices=['none', 'per_video_minmax'])
+    parser.add_argument('--reg_loss', type=str, default='huber',
+                        choices=['mse', 'huber'])
+    parser.add_argument('--lambda_step_reg', type=float, default=1.0)
+    parser.add_argument('--use_shot_balance', type=str2bool, default='true')
+    parser.add_argument('--lambda_shot_aux', type=float, default=0.5)
+    parser.add_argument('--shot_pool', type=str, default='mean', choices=['mean'])
+    parser.add_argument('--use_rankcorr', type=str2bool, default='true')
+    parser.add_argument('--lambda_rankcorr', type=float, default=0.2)
+    parser.add_argument('--rankcorr_tau', type=float, default=0.1)
     parser.add_argument('--weak_pos_ratio', type=float, default=0.15,
                         help='Top ratio of externally weak-labeled positions treated as positive for pairwise ranking')
     parser.add_argument('--weak_neg_ratio', type=float, default=0.15,

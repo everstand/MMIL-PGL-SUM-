@@ -21,6 +21,7 @@ from generate_summary import generate_summary
 from rank_metrics import compute_rank_metrics
 
 from layers.summarizer import PGL_SUM
+from rank_ops import spearman_rank_loss
 from utils import TensorboardWriter
 
 
@@ -86,31 +87,137 @@ class Solver(object):
 
     criterion = nn.MSELoss()
 
-    def compute_train_loss(self, output, target, weak_mask=None, pos_mask=None, neg_mask=None):
-        """Compute train loss under the selected supervision paradigm."""
-        output = output.view(-1)
-        target = target.view(-1)
-        if self.config.supervision_setting == 'supervised':
-            loss = self.criterion(output, target)
-            return loss, {'loss_mse': float(loss.detach().cpu().item())}
+    def compute_step_reg_loss(self, pred_step, step_target, step_mask):
+        pred_step = pred_step.view(-1)
+        step_target = step_target.view(-1)
+        step_mask = step_mask.view(-1).bool()
 
-        weak_mask = weak_mask.view(-1).bool()
-        pos_mask = pos_mask.view(-1).bool()
-        neg_mask = neg_mask.view(-1).bool()
-        if int(weak_mask.sum().item()) <= 0:
-            raise ValueError('weak_mask.sum() must be > 0 for weak supervision.')
+        if int(step_mask.sum().item()) <= 0:
+            raise ValueError('step_mask.sum() must be > 0.')
 
-        weak_bce = F.binary_cross_entropy(output[weak_mask], target[weak_mask])
-        if pos_mask.any() and neg_mask.any():
-            rank_margin = self.config.weak_rank_margin - output[pos_mask].unsqueeze(1) + output[neg_mask].unsqueeze(0)
-            weak_rank = torch.relu(rank_margin).mean()
+        if self.config.reg_loss == 'mse':
+            raw = F.mse_loss(pred_step, step_target, reduction='none')
+        elif self.config.reg_loss == 'huber':
+            raw = F.smooth_l1_loss(pred_step, step_target, reduction='none')
         else:
-            weak_rank = output.new_tensor(0.0)
-        loss = weak_bce + self.config.weak_rank_weight * weak_rank
-        return loss, {
-            'loss_bce': float(weak_bce.detach().cpu().item()),
-            'loss_rank': float(weak_rank.detach().cpu().item()),
+            raise ValueError(f'Unsupported reg_loss: {self.config.reg_loss}')
+
+        loss = raw[step_mask].mean()
+        return loss
+
+    def compute_step_weights(self, step_mask, step_shot_idx, shot_len_steps):
+        step_mask = step_mask.view(-1).float()
+        step_shot_idx = step_shot_idx.view(-1).long()
+        shot_len_steps = shot_len_steps.view(-1).float().clamp_min(1.0)
+
+        step_weights = step_mask / shot_len_steps[step_shot_idx]
+        return step_weights
+
+    def aggregate_step_to_shot(self, pred_step, step_shot_idx, n_shots):
+        pred_step = pred_step.view(-1)
+        step_shot_idx = step_shot_idx.view(-1).long()
+
+        if self.config.shot_pool != 'mean':
+            raise ValueError(f'Unsupported shot_pool: {self.config.shot_pool}')
+
+        device = pred_step.device
+        shot_sum = torch.zeros(n_shots, device=device)
+        shot_cnt = torch.zeros(n_shots, device=device)
+
+        shot_sum.scatter_add_(0, step_shot_idx, pred_step)
+        shot_cnt.scatter_add_(0, step_shot_idx, torch.ones_like(pred_step))
+
+        pred_shot = shot_sum / shot_cnt.clamp_min(1.0)
+        return pred_shot
+
+    def compute_step_balanced_reg_loss(self, pred_step, step_target, step_mask, step_shot_idx, shot_len_steps):
+        pred_step = pred_step.view(-1)
+        step_target = step_target.view(-1)
+        step_mask = step_mask.view(-1).bool()
+
+        if self.config.reg_loss == 'mse':
+            raw = F.mse_loss(pred_step, step_target, reduction='none')
+        else:
+            raw = F.smooth_l1_loss(pred_step, step_target, reduction='none')
+
+        weights = self.compute_step_weights(step_mask, step_shot_idx, shot_len_steps)
+        loss = (raw * weights).sum() / weights.sum().clamp_min(1e-6)
+        return loss
+
+    def compute_shot_aux_loss(self, pred_shot, shot_target, shot_mask):
+        shot_target = shot_target.view(-1)
+        shot_mask = shot_mask.view(-1).bool()
+
+        if int(shot_mask.sum().item()) <= 0:
+            raise ValueError('shot_mask.sum() must be > 0.')
+
+        if self.config.reg_loss == 'mse':
+            raw = F.mse_loss(pred_shot, shot_target, reduction='none')
+        else:
+            raw = F.smooth_l1_loss(pred_shot, shot_target, reduction='none')
+
+        return raw[shot_mask].mean()
+
+    def compute_rankcorr_loss(self, pred_shot, shot_target, shot_mask):
+        return spearman_rank_loss(
+            pred_shot,
+            shot_target,
+            shot_mask,
+            tau=self.config.rankcorr_tau,
+        )
+
+    def compute_train_loss(self, pred_step, batch):
+        step_target = batch['step_target'].to(self.config.device).view(-1)
+        step_mask = batch['step_mask'].to(self.config.device).view(-1)
+        pred_step = pred_step.view(-1)
+
+        if self.config.supervision_setting == 'supervised':
+            loss_step = self.compute_step_reg_loss(pred_step, step_target, step_mask)
+            total_loss = loss_step
+            loss_dict = {
+                'loss_step_reg': float(loss_step.detach().cpu().item()),
+                'loss_shot_aux': 0.0,
+                'loss_rankcorr': 0.0,
+                'loss_total': float(total_loss.detach().cpu().item()),
+            }
+            return total_loss, loss_dict
+
+        shot_target = batch['shot_target'].to(self.config.device).view(-1)
+        shot_mask = batch['shot_mask'].to(self.config.device).view(-1)
+        step_shot_idx = batch['step_shot_idx'].to(self.config.device).view(-1)
+        shot_len_steps = batch['shot_len_steps'].to(self.config.device).view(-1)
+
+        if self.config.use_shot_balance:
+            loss_step = self.compute_step_balanced_reg_loss(
+                pred_step, step_target, step_mask, step_shot_idx, shot_len_steps
+            )
+        else:
+            loss_step = self.compute_step_reg_loss(pred_step, step_target, step_mask)
+
+        pred_shot = self.aggregate_step_to_shot(
+            pred_step, step_shot_idx, n_shots=shot_target.numel()
+        )
+
+        loss_shot = self.compute_shot_aux_loss(pred_shot, shot_target, shot_mask)
+
+        if self.config.use_rankcorr:
+            loss_rank = self.compute_rankcorr_loss(pred_shot, shot_target, shot_mask)
+        else:
+            loss_rank = pred_step.new_tensor(0.0)
+
+        total_loss = (
+            self.config.lambda_step_reg * loss_step
+            + self.config.lambda_shot_aux * loss_shot
+            + self.config.lambda_rankcorr * loss_rank
+        )
+
+        loss_dict = {
+            'loss_step_reg': float(loss_step.detach().cpu().item()),
+            'loss_shot_aux': float(loss_shot.detach().cpu().item()),
+            'loss_rankcorr': float(loss_rank.detach().cpu().item()),
+            'loss_total': float(total_loss.detach().cpu().item()),
         }
+        return total_loss, loss_dict
 
     def train(self):
         """ Main function to train the PGL-SUM model. """
@@ -136,19 +243,11 @@ class Solver(object):
                 for _ in trange(current_batch_size, desc='Video', ncols=80, leave=False):
                     batch = next(iterator)
                     frame_features = batch['frame_features'].to(self.config.device)
-                    target = batch['target'].to(self.config.device)
-                    weak_mask = batch['mask'].to(self.config.device)
-                    pos_mask = batch['pos_mask'].to(self.config.device)
-                    neg_mask = batch['neg_mask'].to(self.config.device)
+                    if frame_features.dim() == 3 and frame_features.size(0) == 1:
+                        frame_features = frame_features.squeeze(0)
 
-                    output, weights = self.model(frame_features.squeeze(0))
-                    loss, loss_components = self.compute_train_loss(
-                        output.squeeze(0),
-                        target.squeeze(0),
-                        weak_mask=weak_mask.squeeze(0),
-                        pos_mask=pos_mask.squeeze(0),
-                        neg_mask=neg_mask.squeeze(0),
-                    )
+                    output, weights = self.model(frame_features)
+                    loss, loss_components = self.compute_train_loss(output.squeeze(0), batch)
 
                     if self.config.verbose:
                         tqdm.write(f'[{epoch_i}] loss: {loss.item()}')
@@ -195,7 +294,7 @@ class Solver(object):
 
             log_parts = [f'Epoch {epoch_i + 1:03d}/{self.config.n_epochs:03d}',
                          f'loss={float(loss.detach().cpu().item()):.4f}']
-            for name in ('loss_mse', 'loss_bce', 'loss_rank'):
+            for name in ('loss_mse', 'loss_step_reg', 'loss_shot_aux', 'loss_rankcorr', 'loss_total'):
                 if name in epoch_components:
                     label = name.replace('loss_', '')
                     log_parts.append(f'{label}={epoch_components[name]:.4f}')
@@ -253,12 +352,31 @@ class Solver(object):
             'weak_rank_margin': getattr(self.config, 'weak_rank_margin', None),
             'weak_rank_weight': getattr(self.config, 'weak_rank_weight', None),
             'selection_metric': self.config.selection_metric,
+            'weak_target_norm': getattr(self.config, 'weak_target_norm', None),
+            'reg_loss': getattr(self.config, 'reg_loss', None),
+            'lambda_step_reg': getattr(self.config, 'lambda_step_reg', None),
+            'use_shot_balance': getattr(self.config, 'use_shot_balance', None),
+            'lambda_shot_aux': getattr(self.config, 'lambda_shot_aux', None),
+            'shot_pool': getattr(self.config, 'shot_pool', None),
+            'use_rankcorr': getattr(self.config, 'use_rankcorr', None),
+            'lambda_rankcorr': getattr(self.config, 'lambda_rankcorr', None),
+            'rankcorr_tau': getattr(self.config, 'rankcorr_tau', None),
             'selected_epoch': int(selected_epoch),
             'selected_train_loss': self.train_losses[selected_epoch],
             'train_losses': self.train_losses,
             'val_metrics': self.val_metrics,
             'requested_batch_size': self.config.batch_size,
             'effective_batch_size': min(self.config.batch_size, len(self.train_loader)) if self.train_loader is not None else None,
+            'train_batch_schema': [
+                'frame_features',
+                'step_target',
+                'step_mask',
+                'shot_target',
+                'shot_mask',
+                'step_shot_idx',
+                'shot_len_steps',
+                'video_name',
+            ],
         }
         if self.val_metrics:
             summary['selected_val_metrics'] = self.val_metrics[selected_epoch]

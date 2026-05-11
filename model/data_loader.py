@@ -39,108 +39,129 @@ def _validate_finite(name, array):
         raise ValueError(f'{name} contains NaN or Inf values.')
 
 
-def _expand_shot_utility_to_features(video_name, video_payload, hdf):
+def _normalize_shot_target(shot_target, shot_mask, norm_mode='per_video_minmax'):
+    shot_target = np.asarray(shot_target, dtype=np.float32).copy()
+    shot_mask = np.asarray(shot_mask, dtype=bool)
+
+    if norm_mode == 'none':
+        return shot_target
+
+    valid = np.flatnonzero(shot_mask)
+    if valid.size == 0:
+        raise ValueError('shot_mask has no valid entries.')
+
+    vals = shot_target[valid]
+    vmin, vmax = float(vals.min()), float(vals.max())
+
+    if vmax > vmin:
+        shot_target[valid] = (vals - vmin) / (vmax - vmin)
+    else:
+        shot_target[valid] = 0.5
+
+    shot_target[valid] = np.clip(shot_target[valid], 0.0, 1.0)
+    return shot_target
+
+
+def _expand_shot_utility_to_steps(video_name, video_payload, hdf, norm_mode='per_video_minmax'):
     if not isinstance(video_payload, dict):
         raise TypeError(f'Weak label payload for {video_name} must be a dict.')
     if 'shot_utility' not in video_payload:
-        raise KeyError(f'Missing shot_utility for {video_name}.')
+        raise KeyError(f'Missing shot_utility for {video_name}')
 
-    shot_utility = np.asarray(video_payload['shot_utility'], dtype=np.float32)
-    event_valid_mask = np.asarray(
-        video_payload.get('event_valid_mask', np.ones_like(shot_utility, dtype=bool)),
+    shot_target = np.asarray(video_payload['shot_utility'], dtype=np.float32)
+    shot_mask = np.asarray(
+        video_payload.get('event_valid_mask', np.ones_like(shot_target, dtype=bool)),
         dtype=bool,
     )
 
-    frame_features = np.asarray(hdf[video_name + '/features'])
-    picks = np.asarray(hdf[video_name + '/picks'])
-    change_points = np.asarray(hdf[video_name + '/change_points'])
+    change_points = np.asarray(hdf[f'{video_name}/change_points'])
+    picks = np.asarray(hdf[f'{video_name}/picks'])
+    frame_features = np.asarray(hdf[f'{video_name}/features'])
 
-    if shot_utility.ndim != 1:
-        raise ValueError(f'shot_utility for {video_name} must be 1D.')
-    if event_valid_mask.ndim != 1:
-        raise ValueError(f'event_valid_mask for {video_name} must be 1D.')
-    if len(shot_utility) != len(change_points):
-        raise ValueError(
-            f'shot_utility length mismatch for {video_name}: '
-            f'{len(shot_utility)} vs {len(change_points)} change points.'
-        )
-    if len(event_valid_mask) != len(change_points):
-        raise ValueError(
-            f'event_valid_mask length mismatch for {video_name}: '
-            f'{len(event_valid_mask)} vs {len(change_points)} change points.'
-        )
+    if shot_target.ndim != 1:
+        raise ValueError(f'{video_name}: shot_target must be 1D.')
+    if shot_mask.ndim != 1:
+        raise ValueError(f'{video_name}: shot_mask must be 1D.')
+    if len(shot_target) != len(change_points):
+        raise ValueError(f'{video_name}: shot_target length mismatch.')
+    if len(shot_mask) != len(change_points):
+        raise ValueError(f'{video_name}: shot_mask length mismatch.')
+
+    _validate_finite(f'{video_name} shot_target', shot_target)
+    shot_target = _normalize_shot_target(shot_target, shot_mask, norm_mode=norm_mode)
 
     shot_end = change_points[:, 1]
-    shot_index = np.searchsorted(shot_end, picks, side='left')
-    shot_index = np.clip(shot_index, 0, len(shot_utility) - 1)
-    starts = change_points[shot_index, 0]
-    ends = change_points[shot_index, 1]
+    step_shot_idx = np.searchsorted(shot_end, picks, side='left')
+    step_shot_idx = np.clip(step_shot_idx, 0, len(shot_target) - 1)
+
+    starts = change_points[step_shot_idx, 0]
+    ends = change_points[step_shot_idx, 1]
     if np.any((picks < starts) | (picks > ends)):
-        raise ValueError(f'Failed to align weak shot utility to sampled frames for {video_name}.')
+        raise ValueError(f'{video_name}: failed shot-step alignment.')
 
-    weak_target = shot_utility[shot_index].astype(np.float32)
-    weak_mask = event_valid_mask[shot_index].astype(bool)
+    step_target = shot_target[step_shot_idx].astype(np.float32)
+    step_mask = shot_mask[step_shot_idx].astype(bool)
 
-    if weak_target.shape[0] != frame_features.shape[0]:
-        raise ValueError(
-            f'Weak target length mismatch for {video_name}: '
-            f'{weak_target.shape[0]} vs features {frame_features.shape[0]}.'
-        )
-    _validate_finite(f'{video_name} weak_target', weak_target)
-    if int(weak_mask.sum()) <= 0:
-        raise ValueError(f'{video_name} weak_mask.sum() must be > 0.')
-    valid_target = weak_target[weak_mask]
-    target_min = float(valid_target.min())
-    target_max = float(valid_target.max())
-    if target_min < -1e-6 or target_max > 1.0 + 1e-6:
-        raise ValueError(
-            f'{video_name} weak_target on labeled positions must lie in [0, 1] for BCE: '
-            f'min={target_min:.6f}, max={target_max:.6f}.'
-        )
-    return weak_target, weak_mask
+    if len(step_target) != len(frame_features):
+        raise ValueError(f'{video_name}: step_target length mismatch.')
+    if int(step_mask.sum()) <= 0:
+        raise ValueError(f'{video_name}: step_mask.sum() must be > 0.')
+
+    shot_len_steps = np.bincount(step_shot_idx, minlength=len(shot_target)).astype(np.int64)
+    _validate_finite(f'{video_name} step_target', step_target)
+    valid_step_values = step_target[step_mask]
+    if valid_step_values.size == 0:
+        raise ValueError(f'{video_name}: step_target has no valid entries.')
+    step_min = float(valid_step_values.min())
+    step_max = float(valid_step_values.max())
+    if step_min < -1e-6 or step_max > 1.0 + 1e-6:
+        raise ValueError(f'{video_name}: normalized step_target is outside [0, 1].')
+
+    return step_target, step_mask, shot_target, shot_mask, step_shot_idx.astype(np.int64), shot_len_steps
 
 
-def _build_pos_neg_masks_from_weak_target(weak_target, weak_mask, pos_ratio=0.15, neg_ratio=0.15):
-    weak_target = np.asarray(weak_target, dtype=np.float32)
-    weak_mask = np.asarray(weak_mask, dtype=bool)
-    labeled_idx = np.flatnonzero(weak_mask)
-    if labeled_idx.size == 0:
-        raise ValueError('weak_mask must include at least one labeled position.')
+def _build_supervised_step_targets(video_name, hdf):
+    step_target = np.asarray(hdf[f'{video_name}/gtscore'], dtype=np.float32)
+    change_points = np.asarray(hdf[f'{video_name}/change_points'])
+    picks = np.asarray(hdf[f'{video_name}/picks'])
+    frame_features = np.asarray(hdf[f'{video_name}/features'])
 
-    pos_mask = np.zeros_like(weak_mask, dtype=bool)
-    neg_mask = np.zeros_like(weak_mask, dtype=bool)
-    labeled_scores = weak_target[labeled_idx]
+    if step_target.ndim != 1:
+        raise ValueError(f'{video_name}: gtscore must be 1D.')
+    if len(step_target) != len(frame_features):
+        raise ValueError(f'{video_name}: gtscore length mismatch.')
+    _validate_finite(f'{video_name} gtscore', step_target)
 
-    pos_count = max(1, int(round(labeled_idx.size * pos_ratio)))
-    neg_count = max(1, int(round(labeled_idx.size * neg_ratio)))
-    if labeled_idx.size == 1:
-        pos_count, neg_count = 1, 0
-    else:
-        pos_count = min(pos_count, labeled_idx.size - 1)
-        neg_count = min(neg_count, labeled_idx.size - pos_count)
-        if neg_count <= 0:
-            neg_count = 1
-            pos_count = max(1, labeled_idx.size - 1)
+    shot_end = change_points[:, 1]
+    step_shot_idx = np.searchsorted(shot_end, picks, side='left')
+    step_shot_idx = np.clip(step_shot_idx, 0, len(change_points) - 1)
+    starts = change_points[step_shot_idx, 0]
+    ends = change_points[step_shot_idx, 1]
+    if np.any((picks < starts) | (picks > ends)):
+        raise ValueError(f'{video_name}: failed shot-step alignment.')
 
-    order = np.argsort(labeled_scores)
-    if neg_count > 0:
-        neg_idx = labeled_idx[order[:neg_count]]
-        neg_mask[neg_idx] = True
-    if pos_count > 0:
-        pos_idx = labeled_idx[order[-pos_count:]]
-        pos_mask[pos_idx] = True
+    shot_len_steps = np.bincount(step_shot_idx, minlength=len(change_points)).astype(np.int64)
+    shot_sum = np.bincount(step_shot_idx, weights=step_target, minlength=len(change_points)).astype(np.float32)
+    shot_target = np.zeros(len(change_points), dtype=np.float32)
+    shot_mask = shot_len_steps > 0
+    shot_target[shot_mask] = shot_sum[shot_mask] / shot_len_steps[shot_mask].astype(np.float32)
 
-    overlap = pos_mask & neg_mask
-    if overlap.any():
-        neg_mask[overlap] = False
-    return pos_mask, neg_mask
+    return (
+        step_target.astype(np.float32),
+        np.ones_like(step_target, dtype=bool),
+        shot_target,
+        shot_mask.astype(bool),
+        step_shot_idx.astype(np.int64),
+        shot_len_steps,
+    )
 
 
 class VideoData(Dataset):
     def __init__(self, mode, video_type, split_index, use_val_split=False,
                  val_ratio=0.2, val_seed=0, dataset_root=None, splits_root=None,
                  supervision_setting='supervised', weak_labels_path=None,
-                 weak_pos_ratio=0.15, weak_neg_ratio=0.15):
+                 weak_pos_ratio=0.15, weak_neg_ratio=0.15,
+                 weak_target_norm='per_video_minmax'):
         """Custom Dataset wrapper for frame features and train/eval targets."""
         self.mode = mode.lower()
         if self.mode not in ('train', 'val', 'test'):
@@ -155,6 +176,7 @@ class VideoData(Dataset):
         self.weak_pos_ratio = weak_pos_ratio
         self.weak_neg_ratio = weak_neg_ratio
         self.weak_labels_path = Path(weak_labels_path) if weak_labels_path is not None else None
+        self.weak_target_norm = weak_target_norm
 
         dataset_root = Path(dataset_root)
         splits_root = Path(splits_root)
@@ -214,31 +236,25 @@ class VideoData(Dataset):
                     continue
 
                 if self.supervision_setting == 'weak':
-                    weak_target_np, weak_mask_np = _expand_shot_utility_to_features(
-                        video_name, weak_label_data[video_name], hdf)
-                    pos_mask_np, neg_mask_np = _build_pos_neg_masks_from_weak_target(
-                        weak_target_np, weak_mask_np,
-                        pos_ratio=self.weak_pos_ratio,
-                        neg_ratio=self.weak_neg_ratio,
-                    )
-                    self.train_samples.append({
-                        'frame_features': frame_features,
-                        'target': torch.tensor(weak_target_np, dtype=torch.float32),
-                        'mask': torch.tensor(weak_mask_np, dtype=torch.bool),
-                        'pos_mask': torch.tensor(pos_mask_np, dtype=torch.bool),
-                        'neg_mask': torch.tensor(neg_mask_np, dtype=torch.bool),
-                        'video_name': video_name,
-                    })
+                    step_target_np, step_mask_np, shot_target_np, shot_mask_np, step_shot_idx_np, shot_len_steps_np = \
+                        _expand_shot_utility_to_steps(
+                            video_name, weak_label_data[video_name], hdf,
+                            norm_mode=self.weak_target_norm,
+                        )
                 else:
-                    gtscore = torch.tensor(np.asarray(hdf[video_name + '/gtscore']), dtype=torch.float32)
-                    self.train_samples.append({
-                        'frame_features': frame_features,
-                        'target': gtscore,
-                        'mask': torch.ones_like(gtscore, dtype=torch.bool),
-                        'pos_mask': torch.zeros_like(gtscore, dtype=torch.bool),
-                        'neg_mask': torch.zeros_like(gtscore, dtype=torch.bool),
-                        'video_name': video_name,
-                    })
+                    step_target_np, step_mask_np, shot_target_np, shot_mask_np, step_shot_idx_np, shot_len_steps_np = \
+                        _build_supervised_step_targets(video_name, hdf)
+
+                self.train_samples.append({
+                    'frame_features': frame_features,
+                    'step_target': torch.tensor(step_target_np, dtype=torch.float32),
+                    'step_mask': torch.tensor(step_mask_np, dtype=torch.bool),
+                    'shot_target': torch.tensor(shot_target_np, dtype=torch.float32),
+                    'shot_mask': torch.tensor(shot_mask_np, dtype=torch.bool),
+                    'step_shot_idx': torch.tensor(step_shot_idx_np, dtype=torch.long),
+                    'shot_len_steps': torch.tensor(shot_len_steps_np, dtype=torch.long),
+                    'video_name': video_name,
+                })
 
     def _check_disjoint(self):
         train_keys = set(self.key_sets['train'])
@@ -262,10 +278,17 @@ class VideoData(Dataset):
         return self.train_samples[index]
 
 
+def _single_item_collate(batch):
+    if len(batch) != 1:
+        raise ValueError(f'Expected batch_size=1 for train loader, got {len(batch)} items.')
+    return batch[0]
+
+
 def get_loader(mode, video_type, split_index, use_val_split=False,
                val_ratio=0.2, val_seed=0, dataset_root=None, splits_root=None,
                supervision_setting='supervised', weak_labels_path=None,
-               weak_pos_ratio=0.15, weak_neg_ratio=0.15):
+               weak_pos_ratio=0.15, weak_neg_ratio=0.15,
+               weak_target_norm='per_video_minmax'):
     vd = VideoData(
         mode, video_type, split_index,
         use_val_split=use_val_split,
@@ -277,11 +300,13 @@ def get_loader(mode, video_type, split_index, use_val_split=False,
         weak_labels_path=weak_labels_path,
         weak_pos_ratio=weak_pos_ratio,
         weak_neg_ratio=weak_neg_ratio,
+        weak_target_norm=weak_target_norm,
     )
     if mode.lower() == 'train':
-        return DataLoader(vd, batch_size=1, shuffle=True)
+        return DataLoader(vd, batch_size=1, shuffle=True, collate_fn=_single_item_collate)
     return vd
 
 
 if __name__ == '__main__':
     pass
+

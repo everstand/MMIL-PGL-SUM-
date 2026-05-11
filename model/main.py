@@ -142,7 +142,7 @@ def write_cv_summary(config):
         'note': 'This dataset-level cross-validation summary reports final test metrics only. Validation metrics remain split-level under selected_val_metrics.',
     }
     summary_path = dataset_dir.joinpath('cv_summary.json')
-    summary_path.write_text(json.dumps(summary, indent=2))
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding='utf-8')
     summary_path.chmod(0o777)
 
 
@@ -177,6 +177,7 @@ if __name__ == '__main__':
         weak_labels_path=config.weak_labels_path,
         weak_pos_ratio=config.weak_pos_ratio,
         weak_neg_ratio=config.weak_neg_ratio,
+        weak_target_norm=config.weak_target_norm,
     )
     val_loader = None
     test_loader = None
@@ -191,6 +192,7 @@ if __name__ == '__main__':
             weak_labels_path=config.weak_labels_path,
             weak_pos_ratio=config.weak_pos_ratio,
             weak_neg_ratio=config.weak_neg_ratio,
+            weak_target_norm=config.weak_target_norm,
         )
     else:
         val_loader = get_loader(
@@ -203,6 +205,7 @@ if __name__ == '__main__':
             weak_labels_path=config.weak_labels_path,
             weak_pos_ratio=config.weak_pos_ratio,
             weak_neg_ratio=config.weak_neg_ratio,
+            weak_target_norm=config.weak_target_norm,
         )
         assert_disjoint('train_keys', loader_keys(train_loader), 'val_keys', loader_keys(val_loader))
 
@@ -227,6 +230,7 @@ if __name__ == '__main__':
             weak_labels_path=config.weak_labels_path,
             weak_pos_ratio=config.weak_pos_ratio,
             weak_neg_ratio=config.weak_neg_ratio,
+            weak_target_norm=config.weak_target_norm,
         )
         assert_disjoint('train_keys', loader_keys(train_loader), 'test_keys', loader_keys(test_loader))
         assert_disjoint('val_keys', loader_keys(val_loader), 'test_keys', loader_keys(test_loader))
