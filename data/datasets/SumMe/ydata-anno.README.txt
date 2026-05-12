@@ -1,0 +1,3 @@
+This file is a repo-local export from data/datasets/SumMe/eccv16_dataset_summe_google_pool5.h5:user_summary.
+Unlike TVSum ydata-anno.tsv, SumMe does not use an official ydata TSV in the public PGL-SUM/CA-SUM rank protocol.
+Rows are: video_key, annotator_id, comma-separated 0/1 frame summary labels.
