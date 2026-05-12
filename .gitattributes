@@ -3,3 +3,4 @@ data/datasets/TVSum/eccv16_dataset_tvsum_google_pool5.h5 filter=lfs diff=lfs mer
 data/**/*.h5 filter=lfs diff=lfs merge=lfs -text
 data/weak_labels/summe_shot_utility.npy filter=lfs diff=lfs merge=lfs -text
 data/weak_labels/tvsum_shot_utility.npy filter=lfs diff=lfs merge=lfs -text
+data/features/**/*.h5 filter=lfs diff=lfs merge=lfs -text
