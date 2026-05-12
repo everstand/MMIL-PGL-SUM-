@@ -1,0 +1,2 @@
+data/datasets/SumMe/eccv16_dataset_summe_google_pool5.h5 filter=lfs diff=lfs merge=lfs -text
+data/datasets/TVSum/eccv16_dataset_tvsum_google_pool5.h5 filter=lfs diff=lfs merge=lfs -text
